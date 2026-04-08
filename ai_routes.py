@@ -53,10 +53,13 @@ async def consultar(
 ):
     print("--- INICIANDO MODO BYPASS ---")
     
-    # A. FORZAR USUARIO (Bypass de Token)
-    user = db.query(User).filter(User.id == 1).first()
+    # A. FORZAR USUARIO (Bypass de Token usando ID 39)
+    user = db.query(User).filter(User.id == 39).first()
     if not user:
-        raise HTTPException(status_code=404, detail="MODO BYPASS: No existe el usuario ID 1 en la base de datos.")
+        raise HTTPException(
+            status_code=404, 
+            detail="MODO BYPASS: No existe el usuario ID 39 en la base de datos."
+        )
 
     # B. LÓGICA DE BASE DE DATOS E IA
     try:
@@ -118,11 +121,11 @@ async def ver_historial(
 ):
     print("--- INICIANDO HISTORIAL MODO BYPASS ---")
     try:
-        # Forzamos el mismo usuario 1
+        # Forzamos el mismo usuario 39
         user = db.query(User).filter(User.id == 39).first()
         
         if not user:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado para historial")
+            raise HTTPException(status_code=404, detail="Usuario no encontrado para historial (ID 39)")
         
         chats = db.query(AIChatHistory).filter(
             AIChatHistory.user_id == user.id
