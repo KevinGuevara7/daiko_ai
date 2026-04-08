@@ -1,6 +1,6 @@
 import json
 import os
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # --- IMPORTACIONES DE TU PROYECTO ---
 from database import get_db
 from models import User, AIUsageStats, AIChatHistory, Transaction
-from auth import verify_token, oauth2_scheme
+# from auth import verify_token, oauth2_scheme # COMENTADO PARA BYPASS
 
 # 1. CARGAR CONFIGURACIÓN
 load_dotenv()
@@ -48,23 +48,25 @@ JSON SCHEMA STRUCTURE:
 @router.get("/consultar")
 async def consultar(
     pregunta: str, 
-    db: Session = Depends(get_db), 
-    token: str = Depends(oauth2_scheme)
+    db: Session = Depends(get_db)
+    # token: str = Depends(oauth2_scheme) <-- ELIMINADO PARA BYPASS
 ):
-    try:
-        # A. IDENTIFICAR USUARIO POR EL TOKEN
-        data = verify_token(token)
-        user = db.query(User).filter(User.email == data["sub"]).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    print("--- INICIANDO MODO BYPASS ---")
+    
+    # A. FORZAR USUARIO (Bypass de Token)
+    user = db.query(User).filter(User.id == 1).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="MODO BYPASS: No existe el usuario ID 1 en la base de datos.")
 
-        # B. VERIFICAR LÍMITE DE TOKENS (Uso de tu tabla ai_usage_stats)
+    # B. LÓGICA DE BASE DE DATOS E IA
+    try:
+        # 1. VERIFICAR LÍMITE DE TOKENS
         stats = db.query(AIUsageStats).filter(AIUsageStats.user_id == user.id).first()
         if not stats:
-            # Si por alguna razón no existe, lo creamos
             stats = AIUsageStats(user_id=user.id)
             db.add(stats)
             db.commit()
+            db.refresh(stats)
 
         if stats.daily_tokens_count >= stats.daily_limit:
             return {
@@ -72,11 +74,14 @@ async def consultar(
                 "type": "text"
             }
 
-        # C. OBTENER CONTEXTO REAL (Últimos 5 gastos del usuario)
+        # 2. OBTENER CONTEXTO REAL (Últimos 5 gastos del usuario)
         gastos = db.query(Transaction).filter(Transaction.user_id == user.id).limit(5).all()
-        resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
+        if gastos:
+            resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
+        else:
+            resumen_gastos = "El usuario aún no tiene gastos registrados."
 
-        # D. LLAMADA A GEMINI
+        # 3. LLAMADA A GEMINI
         prompt_final = f"{CONTEXTO_DAIKO}\n\nCONTEXTO GASTOS USUARIO:\n{resumen_gastos}\n\nPREGUNTA USUARIO: {pregunta}"
         
         response = model.generate_content(
@@ -86,14 +91,13 @@ async def consultar(
 
         resultado = json.loads(response.text)
 
-        # E. ACTUALIZAR BASE DE DATOS (Historial y Tokens)
-        # 1. Guardar en el historial
+        # 4. ACTUALIZAR BASE DE DATOS
         nuevo_chat = AIChatHistory(
             user_id=user.id,
             user_message=pregunta,
-            ai_response=resultado
+            ai_response=resultado 
         )
-        # 2. Sumar token usado
+        
         stats.daily_tokens_count += 1
         
         db.add(nuevo_chat)
@@ -102,24 +106,31 @@ async def consultar(
         return resultado 
 
     except Exception as e:
-        db.rollback() # Si algo falla, deshacemos cambios en DB
-        print(f"Error en Daiko: {e}")
-        raise HTTPException(status_code=500, detail="Error interno de Daiko")
+        db.rollback() 
+        print(f"FALLO MASIVO EN MODO BYPASS: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"El servidor explotó por: {str(e)}")
+
 
 @router.get("/historial")
 async def ver_historial(
-    db: Session = Depends(get_db), 
-    token: str = Depends(oauth2_scheme)
+    db: Session = Depends(get_db)
+    # token: str = Depends(oauth2_scheme) <-- ELIMINADO PARA BYPASS
 ):
-    data = verify_token(token)
-    user = db.query(User).filter(User.email == data["sub"]).first()
-    
-    # Validación de seguridad extra
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    chats = db.query(AIChatHistory).filter(
-        AIChatHistory.user_id == user.id
-    ).order_by(AIChatHistory.created_at.desc()).limit(10).all()
-    
-    return chats
+    print("--- INICIANDO HISTORIAL MODO BYPASS ---")
+    try:
+        # Forzamos el mismo usuario 1
+        user = db.query(User).filter(User.id == 1).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado para historial")
+        
+        chats = db.query(AIChatHistory).filter(
+            AIChatHistory.user_id == user.id
+        ).order_by(AIChatHistory.created_at.desc()).limit(10).all()
+        
+        return chats
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error consultando historial: {e}")
+        raise HTTPException(status_code=500, detail="Error obteniendo el historial")
