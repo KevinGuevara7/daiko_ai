@@ -49,70 +49,53 @@ JSON SCHEMA STRUCTURE:
 async def consultar(
     pregunta: str, 
     db: Session = Depends(get_db)
-    # token: str = Depends(oauth2_scheme) <-- ELIMINADO PARA BYPASS
 ):
-    print("--- INICIANDO MODO BYPASS ---")
-    
-    # A. FORZAR USUARIO (Bypass de Token usando ID 39)
-    user = db.query(User).filter(User.id == 39).first()
-    if not user:
-        raise HTTPException(
-            status_code=404, 
-            detail="MODO BYPASS: No existe el usuario ID 39 en la base de datos."
-        )
-
-    # B. LÓGICA DE BASE DE DATOS E IA
+    print("--- INICIANDO DIAGNÓSTICO DAIKO ---")
     try:
-        # 1. VERIFICAR LÍMITE DE TOKENS
-        stats = db.query(AIUsageStats).filter(AIUsageStats.user_id == user.id).first()
-        if not stats:
-            stats = AIUsageStats(user_id=user.id)
-            db.add(stats)
+        # [PASO 1] Buscar usuario 39
+        print("Buscando usuario 39...")
+        user = db.query(User).filter(User.id == 39).first()
+        if not user:
+            return {"error": "DB_ERROR", "detalle": "El usuario 39 no existe en la tabla users"}
+
+        # [PASO 2] Contexto de gastos
+        print("Consultando gastos...")
+        try:
+            gastos = db.query(Transaction).filter(Transaction.user_id == user.id).limit(5).all()
+            resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos]) if gastos else "Sin gastos"
+        except Exception as e_db:
+            return {"error": "DB_ERROR_GASTOS", "detalle": str(e_db)}
+
+        # [PASO 3] Llamada a Gemini
+        print("Llamando a Gemini...")
+        try:
+            prompt_final = f"{CONTEXTO_DAIKO}\n\nCONTEXTO GASTOS:\n{resumen_gastos}\n\nPREGUNTA: {pregunta}"
+            response = model.generate_content(
+                prompt_final,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            resultado = json.loads(response.text)
+        except Exception as e_ai:
+            return {"error": "GEMINI_ERROR", "detalle": str(e_ai)}
+
+        # [PASO 4] Guardar historial
+        print("Intentando guardar historial...")
+        try:
+            nuevo_chat = AIChatHistory(
+                user_id=user.id,
+                user_message=pregunta,
+                ai_response=resultado
+            )
+            db.add(nuevo_chat)
             db.commit()
-            db.refresh(stats)
-
-        if stats.daily_tokens_count >= stats.daily_limit:
-            return {
-                "text": "¡Hola! Soy Daiko. Has alcanzado tu límite de 50 consultas diarias. ¡Nos vemos mañana para seguir mejorando tus finanzas!",
-                "type": "text"
-            }
-
-        # 2. OBTENER CONTEXTO REAL (Últimos 5 gastos del usuario)
-        gastos = db.query(Transaction).filter(Transaction.user_id == user.id).limit(5).all()
-        if gastos:
-            resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
-        else:
-            resumen_gastos = "El usuario aún no tiene gastos registrados."
-
-        # 3. LLAMADA A GEMINI
-        prompt_final = f"{CONTEXTO_DAIKO}\n\nCONTEXTO GASTOS USUARIO:\n{resumen_gastos}\n\nPREGUNTA USUARIO: {pregunta}"
-        
-        response = model.generate_content(
-            prompt_final,
-            generation_config={"response_mime_type": "application/json"}
-        )
-
-        resultado = json.loads(response.text)
-
-        # 4. ACTUALIZAR BASE DE DATOS
-        nuevo_chat = AIChatHistory(
-            user_id=user.id,
-            user_message=pregunta,
-            ai_response=resultado 
-        )
-        
-        stats.daily_tokens_count += 1
-        
-        db.add(nuevo_chat)
-        db.commit()
+        except Exception as e_hist:
+            db.rollback()
+            return {"error": "DB_SAVE_ERROR", "detalle": f"No se pudo guardar el chat: {str(e_hist)}"}
 
         return resultado 
 
-    except Exception as e:
-        db.rollback() 
-        print(f"FALLO MASIVO EN MODO BYPASS: {str(e)}") 
-        raise HTTPException(status_code=500, detail=f"El servidor explotó por: {str(e)}")
-
+    except Exception as e_final:
+        return {"error": "ERROR_DESCONOCIDO", "detalle": str(e_final)}
 
 @router.get("/historial")
 async def ver_historial(
