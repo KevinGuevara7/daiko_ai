@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime # Importante para el tiempo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import google.generativeai as genai
@@ -14,8 +15,7 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # 2. CONFIGURAR EL MODELO DE IA
-# Usamos 1.5 Flash para mejor manejo de instrucciones directas
-model = genai.GenerativeModel('gemini-2.5-flash') 
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
 # 3. DEFINIR EL ROUTER
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
@@ -61,14 +61,11 @@ async def consultar(
         resumen_gastos = "Error al leer gastos."
 
     # --- LÓGICA DE SALUDO DINÁMICO ---
-    # Contamos mensajes previos en la BD
     conteo_chats = db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id).count()
     
     if conteo_chats > 0:
-        # Ya hubo mensajes, PROHIBIDO saludar
-        regla_saludo = "IMPORTANT: This is NOT the first message. DO NOT say '¡Hola! Soy Daiko'. Answer the question directly in Spanish."
+        regla_saludo = "IMPORTANT: This is NOT the first message. DO NOT say '¡Hola! Soy Daiko'. Answer directly in Spanish."
     else:
-        # Primer mensaje, OBLIGATORIO saludar
         regla_saludo = "FIRST MESSAGE: You MUST start your response with '¡Hola! Soy Daiko'."
 
     # 3. LLAMADA A GEMINI
@@ -86,14 +83,19 @@ async def consultar(
         )
         resultado = json.loads(response.text)
 
-        # 4. GUARDAR EN HISTORIAL
-        nuevo_chat = AIChatHistory(
-            user_id=user.id,
-            user_message=pregunta,
-            ai_response=resultado
-        )
-        db.add(nuevo_chat)
-        db.commit()
+        # 4. GUARDAR EN HISTORIAL (CORREGIDO)
+        try:
+            nuevo_chat = AIChatHistory(
+                user_id=user.id,
+                user_message=pregunta,
+                ai_response=resultado
+                # NO ponemos created_at para que la DB use su default y no falle
+            )
+            db.add(nuevo_chat)
+            db.commit()
+        except Exception as e_db:
+            db.rollback()
+            print(f"Error guardando historial: {e_db}")
 
         return resultado
 
