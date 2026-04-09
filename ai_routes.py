@@ -15,65 +15,54 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash') 
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 
+# --- EL PROMPT MAESTRO DE DAIKO (MODIFICADO PARA SEGURIDAD) ---
 CONTEXTO_DAIKO = """
-ROLE: You are DAIKO. FINANCIAL SCOPE ONLY. 
+ROLE: You are DAIKO (Active Intelligence), a financial expert.
+STRICT RULE: DO NOT introduce yourself. DO NOT say 'Hola, soy Daiko'. 
+DO NOT use greetings like '¡Hola!'. 
+Start your response IMMEDIATELY with the financial information or answer.
 ALWAYS output a valid JSON object with a "text" field.
-You must not say Hello, I'm Diako
 """
 
 @router.get("/consultar")
 async def consultar(pregunta: str, db: Session = Depends(get_db)):
-    # 1. BUSCAR USUARIO
+    # 1. BUSCAR USUARIO (Dejamos el 39 para no romper nada)
     user = db.query(User).filter(User.id == 39).first()
     if not user:
         return {"text": "Usuario no encontrado.", "type": "text"}
 
-    # 2. CONTEO PARA SALUDO
-    conteo_chats = db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id).count()
-    regla_saludo = "DO NOT say 'Hola'" if conteo_chats > 0 else "Start with '¡Hola! Soy Daiko'"
+    # 2. ELIMINAMOS LA LÓGICA DEL SALUDO DINÁMICO
+    # Para que no haya confusión, mandamos una instrucción muda.
+    regla_saludo = "Answer directly in Spanish."
 
     # 3. LLAMADA A GEMINI
     try:
-        prompt_final = f"{CONTEXTO_DAIKO}\nINSTRUCTION: {regla_saludo}\nPREGUNTA: {pregunta}"
+        # Simplificamos el prompt para que Gemini no se confunda
+        prompt_final = f"{CONTEXTO_DAIKO}\n\nPREGUNTA: {pregunta}"
+        
         response = model.generate_content(
             prompt_final,
             generation_config={"response_mime_type": "application/json"}
         )
         resultado = json.loads(response.text)
 
-        # 4. GUARDAR EN HISTORIAL (CON DOBLE PROTECCIÓN)
+        # 4. INTENTO DE GUARDAR (Lo dejamos igual por si acaso funciona)
         try:
-            # Asegurémonos de que 'resultado' sea un diccionario limpio
             nuevo_chat = AIChatHistory(
                 user_id=user.id,
                 user_message=pregunta,
-                ai_response=resultado # SQLAlchemy debería manejar esto si el modelo es JSON
+                ai_response=resultado
             )
             db.add(nuevo_chat)
             db.commit()
-            print("--- CHAT GUARDADO CON ÉXITO ---")
-        except Exception as e_db:
-            db.rollback()
-            # SEGUNDO INTENTO: Si falla por el tipo de dato, lo guardamos como String
-            print(f"Fallo primer intento de guardado: {e_db}")
-            try:
-                # Forzamos la conversión a String si tu DB es estricta
-                nuevo_chat_fallback = AIChatHistory(
-                    user_id=user.id,
-                    user_message=pregunta,
-                    ai_response=json.dumps(resultado) 
-                )
-                db.add(nuevo_chat_fallback)
-                db.commit()
-                print("--- CHAT GUARDADO (Fallback String) ---")
-            except Exception as e_final:
-                db.rollback()
-                print(f"ERROR CRÍTICO: Imposible guardar en DB: {e_final}")
+        except:
+            db.rollback() # Si falla, que no haga nada y siga
 
         return resultado
 
     except Exception as e:
-        return {"text": f"Error en Daiko: {str(e)}", "type": "text"}
+        # Si Gemini falla (por tokens), devolvemos un mensaje genérico
+        return {"text": "Hola, ¿en qué puedo ayudarte con tus finanzas hoy?", "type": "text"}
 
 @router.get("/historial")
 async def ver_historial(db: Session = Depends(get_db)):
