@@ -18,6 +18,7 @@ router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 CONTEXTO_DAIKO = """
 ROLE: You are DAIKO. FINANCIAL SCOPE ONLY. 
 ALWAYS output a valid JSON object with a "text" field.
+You must not say Hello, I'm Diako
 """
 
 @router.get("/consultar")
