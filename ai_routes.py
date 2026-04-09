@@ -15,7 +15,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # 2. CONFIGURAR EL MODELO DE IA
 # Usamos 1.5 Flash para mejor manejo de instrucciones directas
-model = genai.GenerativeModel('gemini-1.5-flash') 
+model = genai.GenerativeModel('gemini-2.5-flash') 
 
 # 3. DEFINIR EL ROUTER
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
