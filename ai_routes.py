@@ -15,7 +15,7 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # 2. CONFIGURAR EL MODELO DE IA
-model = genai.GenerativeModel('gemini-2.0-flash') 
+model = genai.GenerativeModel('gemini-2.5-flash') 
 
 # 3. DEFINIR EL ROUTER (Crucial para evitar el NameError)
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
