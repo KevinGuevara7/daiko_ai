@@ -1,44 +1,48 @@
 import json
 import os
-from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# --- IMPORTACIONES DE TU PROYECTO ---
+# --- IMPORTACIONES ---
 from database import get_db
 from models import User, AIChatHistory, Transaction
+from auth import verify_token  # Importamos tu función de seguridad
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash') 
+model = genai.GenerativeModel('gemini-1.5-flash') 
+
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 
-# --- EL PROMPT MAESTRO DE DAIKO (MODIFICADO PARA SEGURIDAD) ---
 CONTEXTO_DAIKO = """
-ROLE: You are DAIKO (Active Intelligence), a financial expert.
-STRICT RULE: DO NOT introduce yourself. DO NOT say 'Hola, soy Daiko'. 
-DO NOT use greetings like '¡Hola!'. 
-Start your response IMMEDIATELY with the financial information or answer.
+ROLE: You are DAIKO, a financial expert for the Finara app.
+STRICT RULE: Start your response IMMEDIATELY with the financial answer in Spanish. 
+DO NOT introduce yourself or say 'Hola'. 
 ALWAYS output a valid JSON object with a "text" field.
 """
 
 @router.get("/consultar")
-async def consultar(pregunta: str, db: Session = Depends(get_db)):
-    # 1. BUSCAR USUARIO (Dejamos el 39 para no romper nada)
-    user = db.query(User).filter(User.id == 39).first()
+async def consultar(
+    pregunta: str, 
+    db: Session = Depends(get_db), 
+    token_data: dict = Depends(verify_token) # Verifica el JWT
+):
+    # 1. IDENTIFICAR AL USUARIO DESDE EL TOKEN
+    user_email = token_data.get("sub")
+    user = db.query(User).filter(User.email == user_email).first()
+    
     if not user:
-        return {"text": "Usuario no encontrado.", "type": "text"}
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # 2. ELIMINAMOS LA LÓGICA DEL SALUDO DINÁMICO
-    # Para que no haya confusión, mandamos una instrucción muda.
-    regla_saludo = "Answer directly in Spanish."
+    # 2. OBTENER CONTEXTO DE SUS GASTOS (Últimos 5)
+    gastos = db.query(Transaction).filter(Transaction.user_id == user.id).limit(5).all()
+    resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
 
     # 3. LLAMADA A GEMINI
     try:
-        # Simplificamos el prompt para que Gemini no se confunda
-        prompt_final = f"{CONTEXTO_DAIKO}\n\nPREGUNTA: {pregunta}"
+        prompt_final = f"{CONTEXTO_DAIKO}\nCONTEXTO GASTOS:\n{resumen_gastos}\nPREGUNTA: {pregunta}"
         
         response = model.generate_content(
             prompt_final,
@@ -46,24 +50,34 @@ async def consultar(pregunta: str, db: Session = Depends(get_db)):
         )
         resultado = json.loads(response.text)
 
-        # 4. INTENTO DE GUARDAR (Lo dejamos igual por si acaso funciona)
+        # 4. GUARDADO EN HISTORIAL (Vinculado al ID real)
         try:
             nuevo_chat = AIChatHistory(
                 user_id=user.id,
                 user_message=pregunta,
-                ai_response=resultado
+                ai_response=resultado 
             )
             db.add(nuevo_chat)
             db.commit()
-        except:
-            db.rollback() # Si falla, que no haga nada y siga
+        except Exception as e_db:
+            db.rollback()
+            print(f"Error guardando en DB: {e_db}")
 
         return resultado
 
     except Exception as e:
-        # Si Gemini falla (por tokens), devolvemos un mensaje genérico
-        return {"text": "Hola, ¿en qué puedo ayudarte con tus finanzas hoy?", "type": "text"}
+        print(f"Error Gemini: {e}")
+        return {"text": "Daiko está procesando datos financieros, reintenta en un momento.", "type": "text"}
 
 @router.get("/historial")
-async def ver_historial(db: Session = Depends(get_db)):
-    return db.query(AIChatHistory).filter(AIChatHistory.user_id == 39).all()
+async def ver_historial(
+    db: Session = Depends(get_db), 
+    token_data: dict = Depends(verify_token)
+):
+    # Extraemos el usuario del token para mostrar solo SU historial
+    user_email = token_data.get("sub")
+    user = db.query(User).filter(User.email == user_email).first()
+    
+    return db.query(AIChatHistory).filter(
+        AIChatHistory.user_id == user.id
+    ).order_by(AIChatHistory.created_at.desc()).limit(20).all()
