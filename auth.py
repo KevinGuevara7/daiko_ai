@@ -12,16 +12,18 @@ ALGORITHM = "HS256"
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 def verify_token(token: str = Depends(oauth2_scheme)):
+    print(f"--- DEBUG AUTH START ---")
+    print(f"TOKEN RECIBIDO: {token[:10]}...") # Solo los primeros 10 caracteres por seguridad
     try:
+        # Intentamos decodificar
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-
-        user_id: int = payload.get("user_id") 
-        
-        if email is None:
-            raise HTTPException(status_code=401, detail="Token inválido")
-            
-
-        return payload 
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token expirado o inválido")
+        print(f"DEBUG AUTH: Decodificación exitosa para: {payload.get('sub')}")
+        return payload
+    except JWTError as e:
+        print(f"DEBUG AUTH ERROR: {str(e)}")
+        # Aquí sabremos si es 'Signature verification failed' (Clave secreta mal)
+        # o 'Signature has expired' (Tiempo agotado)
+        raise HTTPException(
+            status_code=401, 
+            detail=f"Error de Autenticación: {str(e)}"
+        )
