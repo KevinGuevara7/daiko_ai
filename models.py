@@ -90,10 +90,14 @@ class AIChatHistory(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    
+    # NUEVA COLUMNA: Para agrupar mensajes en una misma conversación
+    session_id = Column(String, index=True) 
+    # NUEVA COLUMNA: Para darle un título al chat (ej: "Duda sobre Gasolina")
+    session_title = Column(String, default="Nueva conversación")
+
     user_message = Column(Text)
     ai_response = Column(JSONB) 
-    
-    # IMPORTANTE: server_default evita errores de "can't adapt type"
     created_at = Column(DateTime, server_default=func.now())
 
     user = relationship("User", back_populates="ai_history")
