@@ -1,145 +1,103 @@
-import json
-import os
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-import google.generativeai as genai
-from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import List, Optional
+from sqlalchemy import Column, ForeignKey, Integer, String, DateTime, Float, Text, Boolean, func
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
+from database import Base
 
-# --- IMPORTACIONES PROPIAS ---
-from database import get_db
-from models import User, AIChatHistory, Transaction
-from auth import verify_token 
+# Tabla of Roles
+class Role(Base):
+    __tablename__ = "roles"
 
-load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash') 
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True)
 
-router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
+    users = relationship("User", back_populates="role")
 
-# --- MODELO DE ENTRADA PARA EL POST ---
-class ConsultaChat(BaseModel):
-    pregunta: str
-    session_id: str  # Campo obligatorio para evitar el NULL
-    user_name: Optional[str] = "Kevin"
+# Table users
+class User(Base):
+    __tablename__ = "users"
 
-# Instrucción de sistema ajustada
-CONTEXTO_DAIKO = """
-ROLE: Eres DAIKO, experto financiero de la app Finara. Tu usuario es Kevin.
-STRICT RULE: Responde directamente en español. 
-NO te presentes, NO digas 'Hola', NO digas 'Muy bien Kevin'. 
-Si el historial muestra que ya saludaste, ve directo al grano.
-ALWAYS output a valid JSON object with a "text" field.
-"""
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    email = Column(String, unique=True, index=True)
+    password = Column(String)
 
-@router.post("/consultar") # Cambiado a POST para manejar el cuerpo JSON
-async def consultar(
-    data: ConsultaChat, 
-    db: Session = Depends(get_db), 
-    token_data: dict = Depends(verify_token)
-):
-    # 1. IDENTIFICAR AL USUARIO
-    user_email = token_data.get("sub")
-    user = db.query(User).filter(User.email == user_email).first()
+    role_id = Column(Integer, ForeignKey("roles.id"))
+    role = relationship("Role", back_populates="users")
+
+    # Relaciones con cascada (Si borras al usuario, se limpia todo lo demás)
+    transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
+    reset_tokens = relationship("PasswordResetToken", backref="user", cascade="all, delete-orphan")
+    ai_stats = relationship("AIUsageStats", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    ai_history = relationship("AIChatHistory", back_populates="user", cascade="all, delete-orphan")
+
+#Table transaction
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Float)
+    type = Column(String)
+    description = Column(String)
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    user = relationship("User", back_populates="transactions")
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    token = Column(String, unique=True, index=True)
+    expires_at = Column(DateTime)
+#Table videos
+class VideoCategory(Base):
+    __tablename__ = "video_categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    description = Column(String)
+
+    videos = relationship("Video", back_populates="category", cascade="all, delete-orphan")
+
+class Video(Base):
+    __tablename__ = "videos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    url = Column(String)
+
+    category_id = Column(Integer, ForeignKey("video_categories.id", ondelete="CASCADE"))
+    category = relationship("VideoCategory", back_populates="videos")
+
+# --- TABLAS DE IA ---
+
+class AIUsageStats(Base):
+    __tablename__ = "ai_usage_stats"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    daily_tokens_count = Column(Integer, default=0)
+    daily_limit = Column(Integer, default=50)
+
+    # Cambiamos a server_default para que la DB maneje la hora
+    last_query_timestamp = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    is_premium = Column(Boolean, default=False)
+
+    user = relationship("User", back_populates="ai_stats")
+
+class AIChatHistory(Base):
+    __tablename__ = "ai_chat_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
     
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    # NUEVA COLUMNA: Para agrupar mensajes en una misma conversación
+    session_id = Column(String, index=True) 
+    # NUEVA COLUMNA: Para darle un título al chat (ej: "Duda sobre Gasolina")
+    session_title = Column(String, default="Nueva conversación")
 
-    # 2. OBTENER CONTEXTO DE GASTOS REALES
-    gastos = db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.id.desc()).limit(10).all()
-    resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
+    user_message = Column(Text)
+    ai_response = Column(JSONB) 
+    created_at = Column(DateTime, server_default=func.now())
 
-    # 3. OBTENER MEMORIA POR SESIÓN (Filtramos por session_id para no mezclar chats)
-    historial_reciente = db.query(AIChatHistory).filter(
-        AIChatHistory.user_id == user.id,
-        AIChatHistory.session_id == data.session_id
-    ).order_by(AIChatHistory.created_at.desc()).limit(5).all()
-    
-    historial_reciente.reverse()
-    
-    memoria_texto = ""
-    for h in historial_reciente:
-        respuesta_previa = h.ai_response["text"] if isinstance(h.ai_response, dict) else h.ai_response
-        memoria_texto += f"Usuario: {h.user_message}\nDaiko: {respuesta_previa}\n"
-
-    # 4. LLAMADA A GEMINI
-    try:
-        prompt_final = f"""
-        {CONTEXTO_DAIKO}
-        
-        DATOS DE GASTOS DEL USUARIO:
-        {resumen_gastos}
-        
-        HISTORIAL DE ESTA SESIÓN:
-        {memoria_texto}
-        
-        PREGUNTA ACTUAL DE {data.user_name}:
-        {data.pregunta}
-        """
-        
-        response = model.generate_content(
-            prompt_final,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        
-        resultado = json.loads(response.text)
-
-        # 5. GUARDAR EN LA BASE DE DATOS (Incluyendo session_id)
-        try:
-            nuevo_chat = AIChatHistory(
-                user_id=user.id,
-                session_id=data.session_id, # Aquí se asigna el ID recibido de Flutter
-                user_message=data.pregunta,
-                ai_response=resultado
-            )
-            db.add(nuevo_chat)
-            db.commit()
-        except Exception as e_db:
-            db.rollback()
-            print(f"Error guardando historial: {e_db}")
-
-        return resultado
-
-    except Exception as e:
-        print(f"Error Gemini: {e}")
-        return {"text": "Lo siento Kevin, Daiko tuvo un error al procesar. Intenta de nuevo.", "type": "error"}
-
-@router.get("/historial/{session_id}") # Endpoint para ver mensajes de una sesión específica
-async def ver_historial_sesion(
-    session_id: str,
-    db: Session = Depends(get_db), 
-    token_data: dict = Depends(verify_token)
-):
-    user_email = token_data.get("sub")
-    user = db.query(User).filter(User.email == user_email).first()
-    
-    registros = db.query(AIChatHistory).filter(
-        AIChatHistory.user_id == user.id,
-        AIChatHistory.session_id == session_id
-    ).order_by(AIChatHistory.created_at.asc()).all()
-
-    return [
-        {
-            "user_message": r.user_message,
-            "ai_response": r.ai_response["text"] if isinstance(r.ai_response, dict) else r.ai_response,
-            "created_at": r.created_at
-        } for r in registros
-    ]
-
-@router.get("/sessions") # Endpoint para listar todas las sesiones en el menú lateral
-async def listar_sesiones(
-    db: Session = Depends(get_db), 
-    token_data: dict = Depends(verify_token)
-):
-    user_email = token_data.get("sub")
-    user = db.query(User).filter(User.email == user_email).first()
-
-    # Agrupamos por session_id para mostrar la lista de chats
-    sesiones = db.query(
-        AIChatHistory.session_id,
-        text("MAX(created_at) as ultima_vez")
-    ).filter(AIChatHistory.user_id == user.id).group_by(AIChatHistory.session_id).order_by(text("ultima_vez DESC")).all()
-
-    return [{"session_id": s.session_id, "ultima_vez": s.ultima_vez} for s in sesiones]
+    user = relationship("User", back_populates="ai_history")
