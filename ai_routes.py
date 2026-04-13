@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# --- IMPORTACIONES ---
+# --- IMPORTACIONES PROPIAS ---
 from database import get_db
 from models import User, AIChatHistory, Transaction
-from auth import verify_token  # Importamos tu función de seguridad
+from auth import verify_token 
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -16,10 +16,12 @@ model = genai.GenerativeModel('gemini-2.5-flash')
 
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 
+# Instrucción de sistema para mantener a Daiko enfocado y evitar saludos repetitivos
 CONTEXTO_DAIKO = """
-ROLE: You are DAIKO, a financial expert for the Finara app.
-STRICT RULE: Start your response IMMEDIATELY with the financial answer in Spanish. 
-DO NOT introduce yourself or say 'Hola'. 
+ROLE: Eres DAIKO, experto financiero de la app Finara. Tu usuario es Kevin.
+STRICT RULE: Responde directamente en español. 
+NO te presentes, NO digas 'Hola', NO digas 'Muy bien Kevin'. 
+Si el historial muestra que ya saludaste, ve directo al grano.
 ALWAYS output a valid JSON object with a "text" field.
 """
 
@@ -27,57 +29,91 @@ ALWAYS output a valid JSON object with a "text" field.
 async def consultar(
     pregunta: str, 
     db: Session = Depends(get_db), 
-    token_data: dict = Depends(verify_token) # Verifica el JWT
+    token_data: dict = Depends(verify_token)
 ):
-    # 1. IDENTIFICAR AL USUARIO DESDE EL TOKEN
+    # 1. IDENTIFICAR AL USUARIO
     user_email = token_data.get("sub")
     user = db.query(User).filter(User.email == user_email).first()
     
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # 2. OBTENER CONTEXTO DE SUS GASTOS (Últimos 5)
-    gastos = db.query(Transaction).filter(Transaction.user_id == user.id).limit(5).all()
+    # 2. OBTENER CONTEXTO DE GASTOS (CRUD)
+    gastos = db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.id.desc()).limit(10).all()
     resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
 
-    # 3. LLAMADA A GEMINI
+    # 3. OBTENER MEMORIA DEL CHAT (Los últimos 3 intercambios para evitar amnesia)
+    historial_reciente = db.query(AIChatHistory).filter(
+        AIChatHistory.user_id == user.id
+    ).order_by(AIChatHistory.created_at.desc()).limit(3).all()
+    
+    # Invertimos para que Gemini lea en orden: Viejo -> Nuevo
+    historial_reciente.reverse()
+    
+    memoria_texto = ""
+    for h in historial_reciente:
+        # Extraemos el texto del JSON guardado si es necesario
+        respuesta_previa = h.ai_response["text"] if isinstance(h.ai_response, dict) else h.ai_response
+        memoria_texto += f"Usuario: {h.user_message}\nDaiko: {respuesta_previa}\n"
+
+    # 4. LLAMADA A GEMINI CON TODO EL CONTEXTO
     try:
-        prompt_final = f"{CONTEXTO_DAIKO}\nCONTEXTO GASTOS:\n{resumen_gastos}\nPREGUNTA: {pregunta}"
+        prompt_final = f"""
+        {CONTEXTO_DAIKO}
+        
+        DATOS DEL CRUD DE GASTOS:
+        {resumen_gastos}
+        
+        HISTORIAL DE CONVERSACIÓN:
+        {memoria_texto}
+        
+        PREGUNTA ACTUAL DEL USUARIO:
+        {pregunta}
+        """
         
         response = model.generate_content(
             prompt_final,
             generation_config={"response_mime_type": "application/json"}
         )
+        
         resultado = json.loads(response.text)
 
-        # 4. GUARDADO EN HISTORIAL (Vinculado al ID real)
+        # 5. GUARDAR EN LA BASE DE DATOS
         try:
             nuevo_chat = AIChatHistory(
                 user_id=user.id,
                 user_message=pregunta,
-                ai_response=resultado 
+                ai_response=resultado # Guardamos el JSON completo
             )
             db.add(nuevo_chat)
             db.commit()
         except Exception as e_db:
             db.rollback()
-            print(f"Error guardando en DB: {e_db}")
+            print(f"Error guardando historial: {e_db}")
 
         return resultado
 
     except Exception as e:
         print(f"Error Gemini: {e}")
-        return {"text": "Daiko está procesando datos financieros, reintenta en un momento.", "type": "text"}
+        return {"text": "Lo siento Kevin, Daiko tuvo un error al procesar. Intenta de nuevo.", "type": "error"}
 
 @router.get("/historial")
 async def ver_historial(
     db: Session = Depends(get_db), 
     token_data: dict = Depends(verify_token)
 ):
-    # Extraemos el usuario del token para mostrar solo SU historial
     user_email = token_data.get("sub")
     user = db.query(User).filter(User.email == user_email).first()
     
-    return db.query(AIChatHistory).filter(
+    registros = db.query(AIChatHistory).filter(
         AIChatHistory.user_id == user.id
     ).order_by(AIChatHistory.created_at.desc()).limit(20).all()
+
+    # Formateamos para que Flutter lo lea fácil
+    return [
+        {
+            "user_message": r.user_message,
+            "ai_response": r.ai_response["text"] if isinstance(r.ai_response, dict) else r.ai_response,
+            "created_at": r.created_at
+        } for r in registros
+    ]
