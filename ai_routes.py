@@ -13,7 +13,7 @@ from auth import verify_token
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 # Usamos flash para mayor velocidad
-model = genai.GenerativeModel('gemini-1.5-flash') 
+model = genai.GenerativeModel('gemini-2.5-flash') 
 
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 
