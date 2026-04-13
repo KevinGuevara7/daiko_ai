@@ -12,16 +12,16 @@ from auth import verify_token
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash') 
+# Usamos flash para mayor velocidad
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
 router = APIRouter(prefix="/ai", tags=["IA (Daiko)"])
 
-# Instrucción de sistema para mantener a Daiko enfocado y evitar saludos repetitivos
 CONTEXTO_DAIKO = """
 ROLE: Eres DAIKO, experto financiero de la app Finara. Tu usuario es Kevin.
 STRICT RULE: Responde directamente en español. 
 NO te presentes, NO digas 'Hola', NO digas 'Muy bien Kevin'. 
-Si el historial muestra que ya saludaste, ve directo al grano.
+Si el usuario pregunta algo personal, recuerda que eres su asistente en Finara.
 ALWAYS output a valid JSON object with a "text" field.
 """
 
@@ -38,36 +38,32 @@ async def consultar(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # 2. OBTENER CONTEXTO DE GASTOS (CRUD)
+    # --- SECCIÓN COMENTADA PARA EVITAR ERRORES DE VALIDACIÓN (422) ---
+    """
+    # 2. OBTENER CONTEXTO DE GASTOS (Temporalmente deshabilitado)
     gastos = db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.id.desc()).limit(10).all()
     resumen_gastos = "\n".join([f"- {g.description}: ${g.amount}" for g in gastos])
 
-    # 3. OBTENER MEMORIA DEL CHAT (Los últimos 3 intercambios para evitar amnesia)
+    # 3. OBTENER MEMORIA DEL CHAT (Temporalmente deshabilitado)
     historial_reciente = db.query(AIChatHistory).filter(
         AIChatHistory.user_id == user.id
     ).order_by(AIChatHistory.created_at.desc()).limit(3).all()
-    
-    # Invertimos para que Gemini lea en orden: Viejo -> Nuevo
     historial_reciente.reverse()
     
     memoria_texto = ""
     for h in historial_reciente:
-        # Extraemos el texto del JSON guardado si es necesario
         respuesta_previa = h.ai_response["text"] if isinstance(h.ai_response, dict) else h.ai_response
         memoria_texto += f"Usuario: {h.user_message}\nDaiko: {respuesta_previa}\n"
+    """
+    # --- FIN DE SECCIÓN COMENTADA ---
 
-    # 4. LLAMADA A GEMINI CON TODO EL CONTEXTO
+    # 4. LLAMADA A GEMINI (Simplificada)
     try:
+        # Prompt limpio para evitar errores de contexto
         prompt_final = f"""
         {CONTEXTO_DAIKO}
         
-        DATOS DEL CRUD DE GASTOS:
-        {resumen_gastos}
-        
-        HISTORIAL DE CONVERSACIÓN:
-        {memoria_texto}
-        
-        PREGUNTA ACTUAL DEL USUARIO:
+        PREGUNTA DEL USUARIO KEVIN:
         {pregunta}
         """
         
@@ -78,12 +74,12 @@ async def consultar(
         
         resultado = json.loads(response.text)
 
-        # 5. GUARDAR EN LA BASE DE DATOS
+        # 5. GUARDAR EN LA BASE DE DATOS (Mantenemos el guardado para que luego puedas reactivar la memoria)
         try:
             nuevo_chat = AIChatHistory(
                 user_id=user.id,
                 user_message=pregunta,
-                ai_response=resultado # Guardamos el JSON completo
+                ai_response=resultado 
             )
             db.add(nuevo_chat)
             db.commit()
@@ -95,7 +91,7 @@ async def consultar(
 
     except Exception as e:
         print(f"Error Gemini: {e}")
-        return {"text": "Lo siento Kevin, Daiko tuvo un error al procesar. Intenta de nuevo.", "type": "error"}
+        return {"text": "Lo siento Kevin, Daiko tiene un pequeño error de conexión. Intenta de nuevo.", "type": "error"}
 
 @router.get("/historial")
 async def ver_historial(
@@ -109,7 +105,6 @@ async def ver_historial(
         AIChatHistory.user_id == user.id
     ).order_by(AIChatHistory.created_at.desc()).limit(20).all()
 
-    # Formateamos para que Flutter lo lea fácil
     return [
         {
             "user_message": r.user_message,
