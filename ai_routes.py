@@ -23,7 +23,6 @@ def obtener_analisis_bolsa(ticker: str):
     """
     try:
         stock = yf.Ticker(ticker)
-        # Traemos 5 días para tener un margen de tendencia
         hist = stock.history(period="5d")
         if hist.empty:
             return {"error": f"No se encontraron datos para el símbolo {ticker}."}
@@ -45,14 +44,11 @@ def obtener_analisis_bolsa(ticker: str):
         return {"error": "Error al conectar con el mercado financiero."}
 
 # --- CONFIGURACIÓN DEL MODELO ---
-# Se define fuera de la función para mayor eficiencia
 model = genai.GenerativeModel(
-    model_name='gemini-2.0-flash', 
+    model_name='gemini-1.5-flash', # Recomiendo 1.5-flash para mayor estabilidad con tools
     tools=[obtener_analisis_bolsa]
 )
 
-# Nota: El prefijo "/ai" aquí + el prefijo "/ai" en main.py puede causar el error 404 (/ai/ai/consultar).
-# Si en main.py ya usas prefix="/ai", deja este APIRouter vacío: APIRouter(tags=["Finara AI"])
 router = APIRouter(tags=["Finara AI"])
 
 class ConsultaChat(BaseModel):
@@ -70,17 +66,15 @@ DAIKO: Inteligencia analítica de Finara. Especialista en optimización de flujo
 - IDIOMA: Español.
 - HERRAMIENTAS: Si el usuario pregunta por precios de acciones, empresas o mercado, USA 'obtener_analisis_bolsa'.
 - BREVEDAD: Ve directo al grano sin saludos.
-- FORMATO: Output estrictamente JSON: {"text": "mensaje"}.
+- FORMATO: Tu respuesta final debe ser SIEMPRE un JSON con la clave "text".
 """
 
 @router.post("/consultar")
 async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
-    # Buscamos al usuario (Kevin)
     user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
     if not user:
         raise HTTPException(status_code=404, detail="No hay usuarios en la base de datos")
 
-    # --- LÓGICA DE CONTEXTO DE GASTOS ---
     if data.contexto_gastos:
         resumen_gastos = "\n".join([f"- {g.get('item', 'Item')}: ${g.get('valor', 0)}" for g in data.contexto_gastos])
         contexto_actual = f"DATOS DE GASTOS ACTUALES DEL USUARIO:\n{resumen_gastos}"
@@ -91,20 +85,23 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
         # Iniciamos chat con herramientas automáticas
         chat = model.start_chat(enable_automatic_function_calling=True)
         
-        # Construcción del prompt
         prompt_final = f"{CONTEXTO_DAIKO}\n\n{contexto_actual}\n\nPregunta: {data.pregunta}"
         
-        # Generación de respuesta
-        response = chat.send_message(
-            prompt_final,
-            generation_config={"response_mime_type": "application/json"}
-        )
+        # Quitamos la restricción de MIME TYPE aquí para que Gemini pueda usar la tool libremente
+        # y luego procesamos el texto a JSON manualmente
+        response = chat.send_message(prompt_final)
         
-        # Parseo del resultado JSON de Gemini
-        resultado = json.loads(response.text)
+        # Intento de parsear JSON, si falla, creamos el esquema manualmente
+        try:
+            # Limpiamos posibles caracteres extraños de la respuesta de Gemini
+            texto_limpio = response.text.replace('```json', '').replace('```', '').strip()
+            resultado = json.loads(texto_limpio)
+            if "text" not in resultado:
+                resultado = {"text": response.text}
+        except:
+            resultado = {"text": response.text}
 
-        # --- GUARDADO EN HISTORIAL (DB) ---
-        # Verificamos si es una sesión nueva para poner un título
+        # Guardado en DB
         es_nuevo = db.query(AIChatHistory).filter(AIChatHistory.session_id == data.session_id).count() == 0
         titulo_chat = data.pregunta[:30] + "..." if es_nuevo else None
 
@@ -113,7 +110,7 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
             session_id=data.session_id, 
             session_title=titulo_chat,
             user_message=data.pregunta, 
-            ai_response=resultado # SQLAlchemy se encarga de convertir el dict a JSON si la columna es JSON
+            ai_response=resultado 
         )
         db.add(nuevo_registro)
         db.commit()
@@ -121,11 +118,10 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
         return resultado
 
     except Exception as e:
-        print(f"Error crítico en Daiko: {e}")
-        return {"text": "Daiko está experimentando una alta latencia financiera. Por favor, reintenta."}
+        print(f"DEBUG ERROR DAIKO: {str(e)}")
+        return {"text": f"Error en procesamiento: {str(e)[:50]}"}
 
-# --- ENDPOINTS ADICIONALES ---
-
+# --- (Endpoints de sesiones y historial se mantienen igual) ---
 @router.get("/sessions")
 async def listar_sesiones(db: Session = Depends(get_db)):
     user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
