@@ -31,14 +31,19 @@ class BolsaEngine:
         if hist.empty:
             return {"error": "Símbolo no encontrado o sin datos"}
 
-        info = ticker.info
+        # Intentar obtener info (maneja errores si la API de Yahoo falla)
+        try:
+            info = ticker.info
+        except:
+            info = {}
+
         precio_actual = hist['Close'].iloc[-1]
         precio_inicial = hist['Close'].iloc[0]
         rendimiento_semanal = ((precio_actual - precio_inicial) / precio_inicial) * 100
 
         return {
             "simbolo": ticker_simbolo,
-            "nombre": info.get('longName', 'N/A'),
+            "nombre": info.get('longName', ticker_simbolo),
             "precio_actual": round(precio_actual, 2),
             "tendencia_semanal_pct": round(rendimiento_semanal, 2),
             "sector": info.get('sector', 'Desconocido'),
@@ -68,8 +73,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Incluimos las rutas de la IA
-app.include_router(ai_router)
+# Registramos el router de IA con el prefijo /ai una sola vez
+app.include_router(ai_router, prefix="/ai")
 
 @app.get("/")
 def health_check():
