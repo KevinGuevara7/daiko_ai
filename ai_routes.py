@@ -45,7 +45,7 @@ def obtener_analisis_bolsa(ticker: str):
 
 # --- CONFIGURACIÓN DEL MODELO ---
 model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash', # Recomiendo 1.5-flash para mayor estabilidad con tools
+    model_name='gemini-2.5-flash', # Recomiendo 1.5-flash para mayor estabilidad con tools
     tools=[obtener_analisis_bolsa]
 )
 
