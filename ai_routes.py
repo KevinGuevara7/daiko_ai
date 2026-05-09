@@ -40,9 +40,8 @@ def obtener_analisis_bolsa(ticker: str):
 CONTEXTO = "DAIKO: Inteligencia analítica de Finara. Responde siempre en JSON con la clave 'text'."
 
 model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash',
-    tools=[obtener_analisis_bolsa],
-    system_instruction=CONTEXTO
+    model_name='gemini-2.5-flash', # Recomiendo 1.5-flash para mayor estabilidad con tools
+    tools=[obtener_analisis_bolsa]
 )
 
 router = APIRouter(tags=["Finara AI"])
@@ -110,6 +109,17 @@ async def listar_sesiones(db: Session = Depends(get_db)):
     return [{"session_id": s.session_id, "title": s.session_title or "Chat"} for s in sesiones]
 
 @router.get("/historial/{session_id}")
-async def ver_historial(session_id: str, db: Session = Depends(get_db)):
-    registros = db.query(AIChatHistory).filter(AIChatHistory.session_id == session_id).all()
-    return [{"user": r.user_message, "ai": r.ai_response} for r in registros]
+async def ver_historial_sesion(session_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
+    registros = db.query(AIChatHistory).filter(
+        AIChatHistory.user_id == user.id, 
+        AIChatHistory.session_id == session_id
+    ).order_by(AIChatHistory.created_at.asc()).all()
+    
+    return [
+        {
+            "user_message": r.user_message, 
+            "ai_response": r.ai_response["text"] if isinstance(r.ai_response, dict) else r.ai_response, 
+            "created_at": r.created_at.isoformat()
+        } for r in registros
+    ]
