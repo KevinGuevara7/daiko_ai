@@ -75,7 +75,7 @@ Usa únicamente esta estructura:
 
 # --- MODELO GEMINI ---
 model = genai.GenerativeModel(
-    model_name="gemini-2.5flash",
+    model_name="gemini-2.5-flash",
     system_instruction=CONTEXTO
 )
 
