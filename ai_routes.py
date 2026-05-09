@@ -18,35 +18,31 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # --- MOTOR DE ANÁLISIS DE BOLSA ---
 def obtener_analisis_bolsa(ticker: str):
-    """
-    Consulta información financiera y de bolsa en tiempo real de una empresa usando su símbolo (ej: AAPL, NVDA, MSFT).
-    """
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d")
         if hist.empty:
-            return {"error": f"No se encontraron datos para el símbolo {ticker}."}
-        
+            return {"error": f"No hay datos para {ticker}"}
         info = stock.info
-        precio_actual = hist['Close'].iloc[-1]
-        precio_inicial = hist['Close'].iloc[0]
-        rendimiento = ((precio_actual - precio_inicial) / precio_inicial) * 100
-
+        actual = hist['Close'].iloc[-1]
+        inicial = hist['Close'].iloc[0]
+        rendimiento = ((actual - inicial) / inicial) * 100
         return {
             "nombre": info.get('longName', ticker),
-            "precio": round(precio_actual, 2),
-            "cambio_semanal": f"{round(rendimiento, 2)}%",
-            "sector": info.get('sector', 'N/A'),
-            "resumen": info.get('longBusinessSummary', '')[:150] + "..."
+            "precio": round(actual, 2),
+            "cambio": f"{round(rendimiento, 2)}%",
+            "sector": info.get('sector', 'N/A')
         }
-    except Exception as e:
-        print(f"Error en Yahoo Finance: {e}")
-        return {"error": "Error al conectar con el mercado financiero."}
+    except Exception:
+        return {"error": "Error de mercado"}
 
 # --- CONFIGURACIÓN DEL MODELO ---
+CONTEXTO = "DAIKO: Inteligencia analítica de Finara. Responde siempre en JSON con la clave 'text'."
+
 model = genai.GenerativeModel(
-    model_name='gemini-1.5-flash', # Recomiendo 1.5-flash para mayor estabilidad con tools
-    tools=[obtener_analisis_bolsa]
+    model_name='gemini-1.5-flash',
+    tools=[obtener_analisis_bolsa],
+    system_instruction=CONTEXTO
 )
 
 router = APIRouter(tags=["Finara AI"])
@@ -58,103 +54,62 @@ class ConsultaChat(BaseModel):
     contexto_gastos: List[dict]
     user_name: Optional[str] = "Kevin"
 
-CONTEXTO_DAIKO = """
-### SYSTEM_ROLE
-DAIKO: Inteligencia analítica de Finara. Especialista en optimización de flujo de caja y estrategia financiera.
-
-### OPERATIONAL_RULES
-- IDIOMA: Español.
-- HERRAMIENTAS: Si el usuario pregunta por precios de acciones, empresas o mercado, USA 'obtener_analisis_bolsa'.
-- BREVEDAD: Ve directo al grano sin saludos.
-- FORMATO: Tu respuesta final debe ser SIEMPRE un JSON con la clave "text".
-"""
-
 @router.post("/consultar")
 async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
+    user = db.query(User).first()
     if not user:
-        raise HTTPException(status_code=404, detail="No hay usuarios en la base de datos")
-
-    if data.contexto_gastos:
-        resumen_gastos = "\n".join([f"- {g.get('item', 'Item')}: ${g.get('valor', 0)}" for g in data.contexto_gastos])
-        contexto_actual = f"DATOS DE GASTOS ACTUALES DEL USUARIO:\n{resumen_gastos}"
-    else:
-        contexto_actual = "El usuario no tiene gastos registrados en esta consulta."
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     try:
-        # Iniciamos chat con herramientas automáticas
-        chat = model.start_chat(enable_automatic_function_calling=True)
+        # 1. Formateo de historial para Gemini
+        h_gemini = []
+        for m in data.historial:
+            role = "user" if m.get("role") == "user" else "model"
+            h_gemini.append({"role": role, "parts": [m.get("text", "")]})
+
+        # 2. Inicio de chat con memoria
+        chat = model.start_chat(history=h_gemini, enable_automatic_function_calling=True)
         
-        prompt_final = f"{CONTEXTO_DAIKO}\n\n{contexto_actual}\n\nPregunta: {data.pregunta}"
+        # 3. Envío de mensaje
+        res = chat.send_message(data.pregunta)
         
-        # Quitamos la restricción de MIME TYPE aquí para que Gemini pueda usar la tool libremente
-        # y luego procesamos el texto a JSON manualmente
-        response = chat.send_message(prompt_final)
+        # 4. Limpieza de respuesta (Sintaxis ultra-segura)
+        t_raw = res.text
+        t_clean = t_raw.strip()
         
-        # Intento de parsear JSON, si falla, creamos el esquema manualmente
+        # Eliminamos marcadores de markdown si existen sin usar comillas complejas
+        if t_clean.startswith("```"):
+            t_clean = t_clean.split("json")[-1].split("\n```")[0].strip()
+        
         try:
-            # Limpiamos posibles caracteres extraños de la respuesta de Gemini
-            texto_limpio = response.text.replace('```json', '').replace('```', '').strip()
-            resultado = json.loads(texto_limpio)
-            if "text" not in resultado:
-                resultado = {"text": response.text}
-        except:
-            resultado = {"text": response.text}
+            resultado = json.loads(t_clean)
+        except Exception:
+            resultado = {"text": t_raw}
 
-        # Guardado en DB
+        # 5. Guardado en Base de Datos
         es_nuevo = db.query(AIChatHistory).filter(AIChatHistory.session_id == data.session_id).count() == 0
-        titulo_chat = data.pregunta[:30] + "..." if es_nuevo else None
-
-        nuevo_registro = AIChatHistory(
+        nuevo = AIChatHistory(
             user_id=user.id, 
             session_id=data.session_id, 
-            session_title=titulo_chat,
+            session_title=data.pregunta[:30] if es_nuevo else None,
             user_message=data.pregunta, 
             ai_response=resultado 
         )
-        db.add(nuevo_registro)
+        db.add(nuevo)
         db.commit()
-
+        
         return resultado
 
     except Exception as e:
-        print(f"DEBUG ERROR DAIKO: {str(e)}")
-        return {"text": f"Error en procesamiento: {str(e)[:50]}"}
+        print(f"Error: {e}")
+        return {"text": "Error en el servidor"}
 
-# --- (Endpoints de sesiones y historial se mantienen igual) ---
 @router.get("/sessions")
 async def listar_sesiones(db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
-    if not user: return []
-    
-    sesiones = db.query(
-        AIChatHistory.session_id, 
-        AIChatHistory.session_title, 
-        func.max(AIChatHistory.created_at).label("ultima_vez")
-    ).filter(AIChatHistory.user_id == user.id)\
-     .group_by(AIChatHistory.session_id, AIChatHistory.session_title)\
-     .order_by(text("ultima_vez DESC")).all()
-    
-    return [
-        {
-            "session_id": s.session_id, 
-            "title": s.session_title or "Conversación", 
-            "ultima_vez": s.ultima_vez.isoformat()
-        } for s in sesiones
-    ]
+    sesiones = db.query(AIChatHistory.session_id, AIChatHistory.session_title).distinct().all()
+    return [{"session_id": s.session_id, "title": s.session_title or "Chat"} for s in sesiones]
 
 @router.get("/historial/{session_id}")
-async def ver_historial_sesion(session_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.name == "Kevin").first() or db.query(User).first()
-    registros = db.query(AIChatHistory).filter(
-        AIChatHistory.user_id == user.id, 
-        AIChatHistory.session_id == session_id
-    ).order_by(AIChatHistory.created_at.asc()).all()
-    
-    return [
-        {
-            "user_message": r.user_message, 
-            "ai_response": r.ai_response["text"] if isinstance(r.ai_response, dict) else r.ai_response, 
-            "created_at": r.created_at.isoformat()
-        } for r in registros
-    ]
+async def ver_historial(session_id: str, db: Session = Depends(get_db)):
+    registros = db.query(AIChatHistory).filter(AIChatHistory.session_id == session_id).all()
+    return [{"user": r.user_message, "ai": r.ai_response} for r in registros]
