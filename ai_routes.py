@@ -42,7 +42,7 @@ def obtener_analisis_bolsa(ticker: str):
         return {"error": "Error al conectar con el mercado."}
 
 # --- CONFIGURACIÓN DEL MODELO ---
-model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+model = genai.GenerativeModel(model_name="gemini-2.5-flash")
 router = APIRouter(tags=["Finara AI"])
 
 # --- ESQUEMA DE DATOS ---
