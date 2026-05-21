@@ -27,45 +27,91 @@ TICKER_ALIASES = {
     "META": "META", "NVIDIA": "NVDA", "NETFLIX": "NFLX",
 }
 
-def extraer_ticker(pregunta: str) -> Optional[str]:
+# Palabras comunes en español/inglés que podrían confundirse con tickers
+PALABRAS_EXCLUIDAS = {
+    "Y", "A", "I", "DE", "LA", "EL", "EN", "VS", "CON", "SU", "UN",
+    "LAS", "LOS", "DEL", "POR", "QUE", "HAY", "SON", "MAS",
+}
+
+# FIX 1: Extraer MÚLTIPLES tickers en lugar de solo uno
+def extraer_tickers(pregunta: str) -> List[str]:
     """
-    Extrae el símbolo bursátil de la pregunta del usuario.
-    Prioriza tickers explícitos en mayúsculas (ej. AAPL, TSLA) o nombres comunes conocidos.
+    Extrae todos los símbolos bursátiles de la pregunta del usuario.
+    Prioriza alias conocidos y luego tickers explícitos en mayúsculas.
+    Evita palabras comunes que no son tickers.
     """
     palabras = pregunta.upper().split()
+    tickers = []
+    vistos = set()
 
-    # 1. Buscar alias conocidos
+    # 1. Buscar alias conocidos primero
     for palabra in palabras:
         limpia = re.sub(r"[^A-Z]", "", palabra)
         if limpia in TICKER_ALIASES:
-            return TICKER_ALIASES[limpia]
+            t = TICKER_ALIASES[limpia]
+            if t not in vistos:
+                tickers.append(t)
+                vistos.add(t)
 
-    # 2. Buscar ticker explícito: entre 1 y 5 letras mayúsculas puras
+    # 2. Buscar tickers explícitos (2-5 letras mayúsculas, no excluidas)
     for palabra in palabras:
-        if re.fullmatch(r"[A-Z]{1,5}", palabra):
-            return palabra
+        limpia = re.sub(r"[^A-Z]", "", palabra)
+        if (
+            re.fullmatch(r"[A-Z]{2,5}", limpia)
+            and limpia not in vistos
+            and limpia not in PALABRAS_EXCLUIDAS
+            and limpia not in TICKER_ALIASES  # ya procesados arriba
+        ):
+            tickers.append(limpia)
+            vistos.add(limpia)
 
-    return None
+    return tickers  # ej: ["GOOGL", "AAPL"] para "compara GOOGL y AAPL"
 
+
+# FIX 2: Fallback GOOGL → GOOG cuando Yahoo Finance no devuelve datos
+TICKER_FALLBACKS = {
+    "GOOGL": "GOOG",
+}
 
 def obtener_analisis_bolsa(ticker: str) -> dict:
     """
     Consulta información financiera en tiempo real usando Yahoo Finance.
     Retorna precio, rendimiento semanal, sector, volumen y resumen del negocio.
+    Incluye fallback para tickers con símbolos alternativos (ej. GOOGL → GOOG).
     """
+    intentos = [ticker]
+    if ticker in TICKER_FALLBACKS:
+        intentos.append(TICKER_FALLBACKS[ticker])
+
+    stock = None
+    hist = None
+
+    for intento in intentos:
+        try:
+            s = yf.Ticker(intento)
+            h = s.history(period="5d")
+            if not h.empty:
+                stock = s
+                hist = h
+                ticker = intento  # usar el símbolo que funcionó
+                break
+        except Exception as e:
+            print(f"[DAIKO] Intento fallido para '{intento}': {e}")
+            continue
+
+    if stock is None or hist is None or hist.empty:
+        return {
+            "error": f"No se encontraron datos para '{ticker}'. "
+                     f"Verifica que el símbolo sea correcto o intenta más tarde."
+        }
+
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="5d")
-
-        if hist.empty:
-            return {"error": f"No se encontraron datos para el ticker '{ticker}'. Verifica que el símbolo sea correcto."}
-
-        info = stock.fast_info
         full_info = stock.info
-
         precio_actual = round(float(hist["Close"].iloc[-1]), 2)
         precio_inicial = round(float(hist["Close"].iloc[0]), 2)
-        rendimiento_semanal = round(((precio_actual - precio_inicial) / precio_inicial) * 100, 2)
+        rendimiento_semanal = round(
+            ((precio_actual - precio_inicial) / precio_inicial) * 100, 2
+        )
         volumen_promedio = int(hist["Volume"].mean())
 
         return {
@@ -82,8 +128,8 @@ def obtener_analisis_bolsa(ticker: str) -> dict:
         }
 
     except Exception as e:
-        print(f"[DAIKO] Error Yahoo Finance para '{ticker}': {e}")
-        return {"error": f"No fue posible obtener datos de mercado para '{ticker}'. Intenta más tarde."}
+        print(f"[DAIKO] Error procesando datos de '{ticker}': {e}")
+        return {"error": f"No fue posible procesar los datos de '{ticker}'. Intenta más tarde."}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +144,10 @@ def analizar_gastos(contexto_gastos: List[dict]) -> str:
         return "No se proporcionaron gastos para analizar."
 
     total = sum(float(g.get("valor", 0)) for g in contexto_gastos)
-    lineas = [f"  • {g.get('item', 'Sin nombre')}: ${float(g.get('valor', 0)):,.2f}" for g in contexto_gastos]
+    lineas = [
+        f"  • {g.get('item', 'Sin nombre')}: ${float(g.get('valor', 0)):,.2f}"
+        for g in contexto_gastos
+    ]
     resumen = "\n".join(lineas)
     return f"GASTOS REGISTRADOS:\n{resumen}\n  TOTAL: ${total:,.2f}"
 
@@ -156,6 +205,7 @@ Usa los datos de mercado provistos para entregar un análisis técnico completo 
 2. Contexto del sector e industria.
 3. Puntos fuertes y factores de riesgo identificables.
 4. Una perspectiva objetiva sobre la situación actual del activo.
+Si se proporcionan múltiples activos, realiza una comparativa entre ellos.
 Evita dar recomendaciones de compra/venta directas; en su lugar, presenta escenarios.
 """,
     "pensar": """
@@ -202,22 +252,51 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
     # Contexto de gastos
     contexto_gastos = analizar_gastos(data.contexto_gastos)
 
-    # Contexto de bolsa (solo en modo bolsa)
+    # FIX 3: Contexto de bolsa con soporte multi-ticker
     contexto_bolsa = ""
-    ticker_detectado = None
     if data.tool == "bolsa":
-        ticker_detectado = extraer_ticker(data.pregunta)
-        if ticker_detectado:
-            datos_mercado = obtener_analisis_bolsa(ticker_detectado)
-            contexto_bolsa = f"\nDATOS DE MERCADO EN TIEMPO REAL:\n{json.dumps(datos_mercado, ensure_ascii=False, indent=2)}"
+        tickers_detectados = extraer_tickers(data.pregunta)
+
+        if tickers_detectados:
+            resultados_mercado = []
+            errores = []
+
+            for ticker in tickers_detectados:
+                datos = obtener_analisis_bolsa(ticker)
+                if "error" in datos:
+                    errores.append(datos["error"])
+                else:
+                    resultados_mercado.append(datos)
+
+            if resultados_mercado:
+                contexto_bolsa = (
+                    f"\nDATOS DE MERCADO EN TIEMPO REAL:\n"
+                    f"{json.dumps(resultados_mercado, ensure_ascii=False, indent=2)}"
+                )
+                # Adjuntar errores parciales si algún ticker falló
+                if errores:
+                    contexto_bolsa += (
+                        f"\n\n[ADVERTENCIA PARCIAL: No se pudieron obtener datos para: "
+                        f"{', '.join(errores)}]"
+                    )
+            else:
+                # Todos los tickers fallaron
+                contexto_bolsa = (
+                    f"\n[ERROR: No fue posible obtener datos de mercado para los símbolos "
+                    f"detectados: {', '.join(tickers_detectados)}. "
+                    f"Informa al usuario e invítalo a verificar los símbolos o intentar más tarde.]"
+                )
         else:
-            contexto_bolsa = "\n[ADVERTENCIA: No se detectó un ticker válido en la pregunta. Solicita al usuario que especifique el símbolo, ej: AAPL, TSLA, AMZN.]"
+            contexto_bolsa = (
+                "\n[ADVERTENCIA: No se detectó ningún ticker válido en la pregunta. "
+                "Solicita al usuario que especifique el símbolo, ej: AAPL, TSLA, AMZN.]"
+            )
 
     # Construir historial de conversación para el modelo
     historial_formateado = ""
     if data.historial:
         entradas = []
-        for msg in data.historial[-6:]:  # últimos 6 turnos para no exceder contexto
+        for msg in data.historial[-6:]:
             rol = "Usuario" if msg.get("role") == "user" else "DAIKO"
             entradas.append(f"{rol}: {msg.get('content', '')}")
         historial_formateado = "\nCONVERSACIÓN PREVIA:\n" + "\n".join(entradas)
