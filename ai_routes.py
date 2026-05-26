@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from datetime import datetime, timezone
 import yfinance as yf
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -18,55 +19,36 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ---------------------------------------------------------------------------
+# LIMITES DIARIOS POR HERRAMIENTA
+# ---------------------------------------------------------------------------
+LIMITES_DIARIOS = {
+    "bolsa": 3,
+    "gastos": 3,
+    "rapido": 5,
+    "pensar": 5
+}
+
+# ---------------------------------------------------------------------------
 # HERRAMIENTA: ANÁLISIS DE BOLSA
 # ---------------------------------------------------------------------------
 
-TICKER_ALIASES = {
-    "APPLE": "AAPL", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL",
-    "AMAZON": "AMZN", "MICROSOFT": "MSFT", "TESLA": "TSLA",
-    "META": "META", "NVIDIA": "NVDA", "NETFLIX": "NFLX",
-}
-
-# Palabras comunes en español/inglés que podrían confundirse con tickers
-PALABRAS_EXCLUIDAS = {
-    "Y", "A", "I", "DE", "LA", "EL", "EN", "VS", "CON", "SU", "UN",
-    "LAS", "LOS", "DEL", "POR", "QUE", "HAY", "SON", "MAS",
-}
-
-# FIX 1: Extraer MÚLTIPLES tickers en lugar de solo uno
-def extraer_tickers(pregunta: str) -> List[str]:
+# FIX 1: Extraer MÚLTIPLES tickers usando Gemini (Inteligencia Artificial)
+def extraer_tickers_ia(pregunta: str) -> List[str]:
     """
-    Extrae todos los símbolos bursátiles de la pregunta del usuario.
-    Prioriza alias conocidos y luego tickers explícitos en mayúsculas.
-    Evita palabras comunes que no son tickers.
+    Extrae todos los símbolos bursátiles de la pregunta del usuario usando IA.
+    Reemplaza la necesidad de diccionarios manuales y detecta nombres naturales.
     """
-    palabras = pregunta.upper().split()
-    tickers = []
-    vistos = set()
-
-    # 1. Buscar alias conocidos primero
-    for palabra in palabras:
-        limpia = re.sub(r"[^A-Z]", "", palabra)
-        if limpia in TICKER_ALIASES:
-            t = TICKER_ALIASES[limpia]
-            if t not in vistos:
-                tickers.append(t)
-                vistos.add(t)
-
-    # 2. Buscar tickers explícitos (2-5 letras mayúsculas, no excluidas)
-    for palabra in palabras:
-        limpia = re.sub(r"[^A-Z]", "", palabra)
-        if (
-            re.fullmatch(r"[A-Z]{2,5}", limpia)
-            and limpia not in vistos
-            and limpia not in PALABRAS_EXCLUIDAS
-            and limpia not in TICKER_ALIASES  # ya procesados arriba
-        ):
-            tickers.append(limpia)
-            vistos.add(limpia)
-
-    return tickers  # ej: ["GOOGL", "AAPL"] para "compara GOOGL y AAPL"
-
+    modelo_extractor = genai.GenerativeModel(model_name="gemini-2.5-flash")
+    prompt = f"Extrae los símbolos bursátiles (tickers de Yahoo Finance) de esta pregunta. Devuelve solo los símbolos separados por comas. Si no hay empresas, devuelve NINGUNO. Pregunta: '{pregunta}'"
+    try:
+        respuesta = modelo_extractor.generate_content(prompt)
+        texto = respuesta.text.strip().upper()
+        if "NINGUNO" in texto or not texto:
+            return []
+        return [t.strip() for t in texto.split(",") if t.strip()]
+    except Exception as e:
+        print(f"[DAIKO] Error en extracción IA: {e}")
+        return []
 
 # FIX 2: Fallback GOOGL → GOOG cuando Yahoo Finance no devuelve datos
 TICKER_FALLBACKS = {
@@ -246,16 +228,35 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos.")
 
+    # --- VALIDACIÓN DE LÍMITES DIARIOS (UTC) ---
+    hoy_utc = datetime.now(timezone.utc).date()
+    consultas_hoy = (
+        db.query(AIChatHistory)
+        .filter(
+            AIChatHistory.user_id == user.id,
+            func.date(AIChatHistory.created_at) == hoy_utc,
+            AIChatHistory.tool == data.tool
+        )
+        .count()
+    )
+
+    limite_permitido = LIMITES_DIARIOS.get(data.tool, 5)
+    if consultas_hoy >= limite_permitido:
+        return {
+            "text": f"Has alcanzado el límite diario de {limite_permitido} consultas para el apartado de {data.tool}. Por favor, vuelve a intentarlo mañana."
+        }
+    # -------------------------------------------
+
     # Seleccionar instrucciones del modo
     instrucciones_modo = INSTRUCCIONES_POR_MODO.get(data.tool, INSTRUCCIONES_POR_MODO["rapido"])
 
     # Contexto de gastos
     contexto_gastos = analizar_gastos(data.contexto_gastos)
 
-    # FIX 3: Contexto de bolsa con soporte multi-ticker
+    # Contexto de bolsa con soporte multi-ticker (Ahora con IA)
     contexto_bolsa = ""
     if data.tool == "bolsa":
-        tickers_detectados = extraer_tickers(data.pregunta)
+        tickers_detectados = extraer_tickers_ia(data.pregunta)
 
         if tickers_detectados:
             resultados_mercado = []
@@ -288,8 +289,7 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
                 )
         else:
             contexto_bolsa = (
-                "\n[ADVERTENCIA: No se detectó ningún ticker válido en la pregunta. "
-                "Solicita al usuario que especifique el símbolo, ej: AAPL, TSLA, AMZN.]"
+                "\n[INSTRUCCIÓN: El usuario no especificó una empresa. Pregúntale amablemente qué acción o sector desea analizar.]"
             )
 
     # Construir historial de conversación para el modelo
@@ -316,9 +316,8 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
         response = model.generate_content(prompt_final)
         texto_raw = response.text.strip()
 
-        # Limpiar posibles bloques de código markdown
-        texto_limpio = re.sub(r"^```(?:json)?\s*", "", texto_raw)
-        texto_limpio = re.sub(r"\s*```$", "", texto_limpio).strip()
+        # Limpiar posibles bloques de código markdown de manera segura
+        texto_limpio = texto_raw.replace("`" * 3 + "json", "").replace("`" * 3, "").strip()
 
         try:
             resultado = json.loads(texto_limpio)
@@ -341,6 +340,7 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
             session_title=titulo_sesion,
             user_message=data.pregunta,
             ai_response=resultado,
+            tool=data.tool # <-- Agregado para que funcione el conteo de los límites
         ))
         db.commit()
 
