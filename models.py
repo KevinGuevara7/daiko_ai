@@ -49,6 +49,7 @@ class PasswordResetToken(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
     token = Column(String, unique=True, index=True)
     expires_at = Column(DateTime)
+    
 #Table videos
 class VideoCategory(Base):
     __tablename__ = "video_categories"
@@ -95,6 +96,9 @@ class AIChatHistory(Base):
     session_id = Column(String, index=True) 
     # NUEVA COLUMNA: Para darle un título al chat (ej: "Duda sobre Gasolina")
     session_title = Column(String, default="Nueva conversación")
+
+    # NUEVA COLUMNA: Para saber qué herramienta se usó y contar los límites
+    tool = Column(String, default="rapido")
 
     user_message = Column(Text)
     ai_response = Column(JSONB) 
