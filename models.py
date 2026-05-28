@@ -97,11 +97,9 @@ class AIChatHistory(Base):
     # NUEVA COLUMNA: Para darle un título al chat (ej: "Duda sobre Gasolina")
     session_title = Column(String, default="Nueva conversación")
 
-    # NUEVA COLUMNA: Para saber qué herramienta se usó y contar los límites
-    tool = Column(String, default="rapido")
+    # ---> LÍNEA DE 'tool' ELIMINADA AQUÍ PARA EVITAR EL ERROR 500 <---
 
     user_message = Column(Text)
     ai_response = Column(JSONB) 
     created_at = Column(DateTime, server_default=func.now())
-
     user = relationship("User", back_populates="ai_history")
