@@ -171,12 +171,8 @@ PRINCIPIOS DE CONDUCTA:
 - Sé directo al identificar riesgos, oportunidades y patrones financieros relevantes.
 - Nunca inventes cifras ni proyecciones si no tienes datos reales.
 
-FORMATO DE RESPUESTA OBLIGATORIO:
-Tu respuesta debe ser SIEMPRE un JSON válido con la siguiente estructura:
-{
-  "text": "<tu análisis completo aquí, puede incluir saltos de línea con \\n>"
-}
-No incluyas bloques de código, comillas adicionales ni texto fuera del JSON.
+FORMATO DE RESPUESTA:
+Responde directamente en texto claro, estructurado o usando Markdown (negritas, listas). NO uses formato JSON ni envuelvas tu respuesta en llaves {}.
 """
 
 INSTRUCCIONES_POR_MODO = {
