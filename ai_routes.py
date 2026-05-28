@@ -257,3 +257,30 @@ async def ver_historial_sesion(session_id: str, db: Session = Depends(get_db)):
     )
 
     return [{"user_message": r.user_message, "ai_response": r.ai_response.get("text", r.ai_response) if isinstance(r.ai_response, dict) else r.ai_response, "created_at": r.created_at.isoformat()} for r in registros]
+
+@router.delete("/sessions/{session_id}")
+async def eliminar_sesion(session_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+    # Buscar todos los mensajes de esa sesión
+    registros = (
+        db.query(AIChatHistory)
+        .filter(
+            AIChatHistory.user_id == user.id,
+            AIChatHistory.session_id == session_id
+        )
+        .all()
+    )
+
+    if not registros:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada.")
+
+    # Eliminar los registros
+    for r in registros:
+        db.delete(r)
+        
+    db.commit()
+
+    return {"message": "Sesión eliminada correctamente"}
