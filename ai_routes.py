@@ -216,11 +216,8 @@ Máximo 3-4 oraciones. Ve directo al punto sin perder precisión.
 
 @router.post("/consultar")
 async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
-    # Obtener usuario
-    user = (
-        db.query(User).filter(User.name == data.user_name).first()
-        or db.query(User).first()
-    )
+    # Búsqueda estricta por usuario (Evita límites/historiales globales)
+    user = db.query(User).filter(User.name == data.user_name).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos.")
 
@@ -315,12 +312,8 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
         # Limpiar posibles bloques de código markdown de manera segura
         texto_limpio = texto_raw.replace("`" * 3 + "json", "").replace("`" * 3, "").strip()
 
-        try:
-            resultado = json.loads(texto_limpio)
-            if "text" not in resultado:
-                resultado = {"text": texto_limpio}
-        except json.JSONDecodeError:
-            resultado = {"text": texto_limpio}
+        # Envolvemos la respuesta directamente (Sin intentar leer JSON)
+        resultado = {"text": texto_limpio}
 
         # Guardar en base de datos
         es_primera_entrada = (
@@ -336,7 +329,7 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
             session_title=titulo_sesion,
             user_message=data.pregunta,
             ai_response=resultado,
-            tool=data.tool # <-- Agregado para que funcione el conteo de los límites
+            tool=data.tool 
         ))
         db.commit()
 
@@ -352,8 +345,9 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/sessions")
-async def listar_sesiones(db: Session = Depends(get_db)):
-    user = db.query(User).first()
+async def listar_sesiones(user_name: str, db: Session = Depends(get_db)):
+    # Búsqueda estricta por usuario
+    user = db.query(User).filter(User.name == user_name).first()
     if not user:
         return []
 
@@ -384,8 +378,9 @@ async def listar_sesiones(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/historial/{session_id}")
-async def ver_historial_sesion(session_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).first()
+async def ver_historial_sesion(session_id: str, user_name: str, db: Session = Depends(get_db)):
+    # Búsqueda estricta por usuario
+    user = db.query(User).filter(User.name == user_name).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
 
@@ -411,3 +406,36 @@ async def ver_historial_sesion(session_id: str, db: Session = Depends(get_db)):
         }
         for r in registros
     ]
+
+
+# ---------------------------------------------------------------------------
+# ELIMINAR UNA SESIÓN (NUEVO ENDPOINT)
+# ---------------------------------------------------------------------------
+
+@router.delete("/sessions/{session_id}")
+async def eliminar_sesion(session_id: str, user_name: str, db: Session = Depends(get_db)):
+    # Búsqueda estricta por usuario
+    user = db.query(User).filter(User.name == user_name).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+    # Buscar todos los mensajes de esa sesión que pertenezcan al usuario
+    registros = (
+        db.query(AIChatHistory)
+        .filter(
+            AIChatHistory.user_id == user.id,
+            AIChatHistory.session_id == session_id
+        )
+        .all()
+    )
+
+    if not registros:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada.")
+
+    # Eliminar los registros
+    for r in registros:
+        db.delete(r)
+        
+    db.commit()
+
+    return {"message": "Sesión eliminada correctamente"}
