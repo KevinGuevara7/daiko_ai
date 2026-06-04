@@ -22,10 +22,10 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 # LIMITES DIARIOS POR HERRAMIENTA
 # ---------------------------------------------------------------------------
 LIMITES_DIARIOS = {
-    "bolsa": 2,
-    "gastos": 1,
-    "rapido": 3,
-    "pensar": 3
+    "bolsa": 3,
+    "gastos": 3,
+    "rapido": 5,
+    "pensar": 5
 }
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ def obtener_analisis_bolsa(ticker: str) -> dict:
     if stock is None or hist is None or hist.empty:
         return {
             "error": f"No se encontraron datos para '{ticker}'. "
-                     f"Verifica que el símbolo sea correcto o intenta más tarde."
+            f"Verifica que el símbolo sea correcto o intenta más tarde."
         }
 
     try:
@@ -439,3 +439,49 @@ async def eliminar_sesion(session_id: str, user_name: str, db: Session = Depends
     db.commit()
 
     return {"message": "Sesión eliminada correctamente"}
+
+
+# ---------------------------------------------------------------------------
+# OBTENER CRÉDITOS IA (NUEVO ENDPOINT PARA SOLUCIONAR EL 404)
+# ---------------------------------------------------------------------------
+
+@router.get("/creditos")
+async def obtener_creditos(db: Session = Depends(get_db)):
+    """
+    Retorna la cantidad de créditos IA disponibles.
+    Al usarse temporalmente 'con una sola cuenta', tomamos automáticamente
+    al primer usuario registrado en la base de datos para no obligar a enviar
+    parámetros adicionales desde la aplicación móvil.
+    """
+    try:
+        user = db.query(User).first()
+        
+        if not user:
+            # Si aún no hay usuarios en la DB, devolvemos un valor base de gracia
+            return {"creditos": 850}
+
+        hoy_utc = datetime.now(timezone.utc).date()
+        
+        # Contamos cuántas interacciones ha tenido este usuario el día de hoy
+        consultas_hoy = (
+            db.query(AIChatHistory)
+            .filter(
+                AIChatHistory.user_id == user.id,
+                func.date(AIChatHistory.created_at) == hoy_utc
+            )
+            .count()
+        )
+
+        # Usamos tu cifra deseada como base total de créditos, restando el uso actual
+        creditos_restantes = 850 - consultas_hoy
+        
+        # Garantizamos que no se envíe un número negativo a Flutter
+        if creditos_restantes < 0:
+            creditos_restantes = 0
+
+        return {"creditos": creditos_restantes}
+
+    except Exception as e:
+        print(f"[DAIKO] Error consultando créditos: {e}")
+        # Valor de contingencia por si la base de datos no responde
+        return {"creditos": 0}
