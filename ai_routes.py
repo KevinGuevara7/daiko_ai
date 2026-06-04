@@ -22,10 +22,10 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 # LIMITES DIARIOS POR HERRAMIENTA
 # ---------------------------------------------------------------------------
 LIMITES_DIARIOS = {
-    "bolsa": 3,
-    "gastos": 3,
-    "rapido": 5,
-    "pensar": 5
+    "bolsa": 2,
+    "gastos": 1,
+    "rapido": 3,
+    "pensar": 3
 }
 
 # ---------------------------------------------------------------------------
