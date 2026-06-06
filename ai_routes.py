@@ -113,7 +113,6 @@ def analizar_gastos(contexto_gastos: List[dict]) -> str:
     resumen = "\n".join(lineas)
     return f"GASTOS REGISTRADOS:\n{resumen}\n  TOTAL: ${total:,.2f}"
 
-
 # ---------------------------------------------------------------------------
 # ESQUEMA DE DATOS Y PROMPTS
 # ---------------------------------------------------------------------------
@@ -192,4 +191,52 @@ async def consultar(data: ConsultaChat, db: Session = Depends(get_db)):
 
         db.add(AIChatHistory(
             user_id=user.id, session_id=data.session_id, session_title=titulo,
-            user_message=data.pregunta, ai_response=resultado, tool=data.tool
+            user_message=data.pregunta, ai_response=resultado, tool=data.tool 
+        ))
+        db.commit()
+        return resultado
+    except Exception as e:
+        print(f"[DAIKO] Error: {e}")
+        return {"text": "Ocurrió un error. Intenta nuevamente."}
+
+@router.get("/sessions")
+async def listar_sesiones(user_name: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.name == user_name).first()
+    if not user: return []
+    sesiones = (
+        db.query(AIChatHistory.session_id, AIChatHistory.session_title, func.max(AIChatHistory.created_at).label("ultima_vez"))
+        .filter(AIChatHistory.user_id == user.id)
+        .group_by(AIChatHistory.session_id, AIChatHistory.session_title)
+        .order_by(text("ultima_vez DESC")).all()
+    )
+    return [{"session_id": s.session_id, "title": s.session_title or "Sin título", "ultima_vez": s.ultima_vez.isoformat()} for s in sesiones]
+
+@router.get("/historial/{session_id}")
+async def ver_historial_sesion(session_id: str, user_name: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.name == user_name).first()
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    registros = db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id, AIChatHistory.session_id == session_id).order_by(AIChatHistory.created_at.asc()).all()
+    return [{"user_message": r.user_message, "ai_response": r.ai_response.get("text", r.ai_response) if isinstance(r.ai_response, dict) else r.ai_response, "created_at": r.created_at.isoformat()} for r in registros]
+
+@router.delete("/sessions/{session_id}")
+async def eliminar_sesion(session_id: str, user_name: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.name == user_name).first()
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    db.query(AIChatHistory).filter(AIChatHistory.user_id == user.id, AIChatHistory.session_id == session_id).delete()
+    db.commit()
+    return {"message": "Sesión eliminada correctamente"}
+
+@router.get("/creditos")
+async def obtener_creditos(user_name: str, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.name == user_name).first()
+        if not user: return LIMITES_DIARIOS
+        hoy_utc = datetime.now(timezone.utc).date()
+        consultas = db.query(AIChatHistory.tool, func.count(AIChatHistory.id)).filter(
+            AIChatHistory.user_id == user.id, func.date(AIChatHistory.created_at) == hoy_utc, AIChatHistory.tool.isnot(None)
+        ).group_by(AIChatHistory.tool).all()
+        usos_hoy = {tool: count for tool, count in consultas}
+        return {tool: max(0, limite - usos_hoy.get(tool, 0)) for tool, limite in LIMITES_DIARIOS.items()}
+    except Exception as e:
+        print(f"[DAIKO] Error créditos: {e}")
+        return {tool: 0 for tool in LIMITES_DIARIOS.keys()}
