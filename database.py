@@ -7,23 +7,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# 1. Arreglamos el prefijo para SQLAlchemy
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# 2. Forzamos el SSL directamente en la URL (Mejor práctica para Render externo)
-if DATABASE_URL and "sslmode=require" not in DATABASE_URL:
-    if "?" in DATABASE_URL:
-        DATABASE_URL += "&sslmode=require"
-    else:
-        DATABASE_URL += "?sslmode=require"
-
-# 3. Motor optimizado para conexiones EXTERNAS
+# Motor optimizado inyectando el SSL de forma nativa
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,  # Verifica si la conexión externa sigue viva
-    pool_recycle=300     # Recicla cada 5 minutos (evita el corte SSL de Render)
+    pool_pre_ping=True,  
+    pool_recycle=300,    
+    connect_args={"sslmode": "require"} # <-- LA CLAVE ESTÁ AQUÍ
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
